@@ -1,0 +1,19 @@
+env: particle
+
+env_args:
+  entity_scheme: True
+  scenario_id: "resource_collection.py"
+  num_agents: 8
+  num_resource: 6
+  mining_radius: 0.2
+  sight_range_kind: 1
+  num_predator: 6
+  num_prey: 2
+
+test_nepisode: 160
+test_interval: 50000
+log_interval: 10000
+runner_log_interval: 10000
+learner_log_interval: 10000
+t_max: 10000000
+
