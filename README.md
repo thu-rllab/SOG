@@ -16,44 +16,31 @@ in an `ENVIRONMENT` from the folder `src/config/envs`
 export CUDA_VISIBLE_DEVICES="0" && python src/main.py --env-config=<ENVIRONMENT> --config=<ALGORITHM> with <PARAMETERS>
 ```
 
-Possible environments are:
+Possible ENVIRONMENTs are:
 - `particle`: Resource collection and Predator-prey environment from the  paper. The default is Resource collection. Add option `env_args.scenario_id="predator_prey.py"` for using the Predator-prey environment.
 - `sc2custom`: StarCraft environment from the paper
-
+  
+Possible ALGORITHMs are:
+- `rlsocom`: SOG-rl in the paper (recommended);
+- `dppsocom`: SOG-dpp in the paper;
+- `socom`: SOG in the paper;
+- `copa`: COPA in the paper;
+- `qmix_atten`: A-QMIX in the paper;
+- `qmix_atten_gat`: MAGIC in Appendix I;
+- `qmix_atten_silgat`: Gated-ACML in Appendix I.
 ## Command examples
 
-  Run SOG with environment Resource collection:
+  Run SOG-rl with environment Resource collection:
 
 ```shell
-export CUDA_VISIBLE_DEVICES="0" && python src/main.py --env-config=particle --config=socom with train_map_num=[2,3,4,5] test_map_num=[6,7,8]
+export CUDA_VISIBLE_DEVICES="0" && python src/main.py --env-config=particle --config=rlsocom with train_map_num=[2,3,4,5] test_map_num=[6,7,8]
 ```
 
-Run SOG with Predator-prey:
-
-```shell
-export CUDA_VISIBLE_DEVICES="0" && python src/main.py --env-config=particle --config=socom with env_args.scenario_id="predator_prey.py" train_map_num=[[3,4],[1]] test_map_num=[[5,6],[1,2]]
+If you want to use this repository, please consider citing:
 ```
-
-Run SOG on StarCraft map 3-8sz_symmetric_G(ather):
-
-```shell
-export CUDA_VISIBLE_DEVICES="0" && python src/main.py --env-config=sc2custom --config=config with scenario=3-8sz_symmetric train_map_num=[3,4,5] test_map_num=[6,7,8]
-```
-
-Run SOG on StarCraft map 3-8MMM_symmetric_D(isperse):
-
-```shell
-export CUDA_VISIBLE_DEVICES="0" && python src/main.py --env-config=sc2custom --config=config with scenario=3-8MMM_symmetric train_map_num=[3,4,5] test_map_num=[6,7,8] env_args.divide_group=True env_args.sight_range=3
-```
-
-If you want to use this repository, please consider cite:
-```
-@inproceedings{
-anonymous2022selforganized,
-title={Self-Organized Group for Cooperative Multi-agent Reinforcement Learning},
-author={Shao, Jianzhun and Lou, Zhiqiang and Zhang, Hongchang and Jiang, Yuhang and He, Shuncheng and Ji, Xiangyang},
-booktitle={Thirty-Sixth Conference on Neural Information Processing Systems},
-year={2022},
-url={https://openreview.net/forum?id=hd5KRowT3oB}
+@inproceedings{shaoself,
+  title={Self-Organized Group for Cooperative Multi-agent Reinforcement Learning},
+  author={Shao, Jianzhun and Lou, Zhiqiang and Zhang, Hongchang and Jiang, Yuhang and He, Shuncheng and Ji, Xiangyang},
+  booktitle={Advances in Neural Information Processing Systems}
 }
 ```
