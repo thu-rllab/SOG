@@ -492,7 +492,7 @@ class StarCraft2CustomEnv(MultiAgentEnv):
 
         # Setting up the interface
         interface_options = sc_pb.InterfaceOptions(raw=True, score=False)
-        self._sc2_proc = self._run_config.start(window_size=self.window_size)
+        self._sc2_proc = self._run_config.start(window_size=self.window_size, want_rgb=False)
         self._controller = self._sc2_proc.controller
         self._bot_controller = self._sc2_proc.controller
 
@@ -1114,13 +1114,13 @@ class StarCraft2CustomEnv(MultiAgentEnv):
             if u_i < self.n_agents:
                 for ac_i in range(self.n_actions - 2):
                     entity[ind + ac_i] = avail_actions[u_i][2 + ac_i]
-            ind += self.n_actions - 2
-            # unit type
+            ind += self.n_actions - 2 
+            # unit type, cur_ind=28
             if self.unit_type_bits > 0:
                 type_id = self.unit_type_ids[unit.unit_type]
                 entity[ind + type_id] = 1
                 ind += self.unit_type_bits
-            if unit.health > 0:  # otherwise dead, return all zeros
+            if unit.health > 0:  # otherwise dead, return all zeros, cur_ind=30 means health, ind 31 means shield
                 # health and shield
                 if self.obs_all_health or self.obs_own_health:
                     entity[ind] = unit.health / unit.health_max
@@ -1130,13 +1130,13 @@ class StarCraft2CustomEnv(MultiAgentEnv):
                         entity[ind + 1] = unit.shield / unit.shield_max
                     ind += 1 + int(self.shield_bits_ally or
                                    self.shield_bits_enemy)
-                # energy and cooldown (for ally units only)
+                # energy and cooldown (for ally units only), ind=32 means energy, ind=33 means cool down
                 if u_i < self.n_agents:
                     if unit.energy_max > 0.0:
                         entity[ind] = unit.energy / unit.energy_max
                     entity[ind + 1] = unit.weapon_cooldown / self.unit_max_cooldown(unit)
                 ind += 2
-                # x-y positions
+                # x-y positions, ind=34,35 means relative [x,y] to map center ranging from [-0.5,0.5], ind=36,37 means relative [x,y] to agent center ranging from [-1,1].
                 entity[ind] = (unit.pos.x - center_x) / self.max_distance_x
                 entity[ind + 1] = (unit.pos.y - center_y) / self.max_distance_y
                 entity[ind + 2] = (unit.pos.x - com_x) / max_dist_com

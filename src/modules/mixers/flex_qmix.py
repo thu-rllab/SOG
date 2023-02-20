@@ -45,9 +45,9 @@ class AttentionHyperNet(nn.Module):
             attn_mask = 1 - th.bmm((1 - agent_mask.to(th.float)).unsqueeze(2),
                                    (1 - entity_mask.to(th.float)).unsqueeze(1))
         x2 = self.attn(x1, pre_mask=attn_mask.to(th.uint8),
-                       post_mask=agent_mask)
+                       post_mask=agent_mask) 
         x3 = self.fc2(x2)
-        x3 = x3.masked_fill(agent_mask.unsqueeze(2).bool(), 0)
+        x3 = x3.masked_fill(agent_mask.unsqueeze(2).bool(), 0) #[bs, na, edim]
         if self.mode == 'vector':
             return x3.mean(dim=1)
         elif self.mode == 'alt_vector':
@@ -83,20 +83,20 @@ class FlexQMixer(nn.Module):
         entities = entities.reshape(bs * max_t, ne, ed)
         entity_mask = entity_mask.reshape(bs * max_t, ne)
         if imagine_groups is not None:
-            agent_qs = agent_qs.view(-1, 1, self.n_agents * 2)
+            agent_qs = agent_qs.reshape(-1, 1, self.n_agents * 2) #[4800,1,16]
             Wmask, Imask = imagine_groups
             w1_W = self.hyper_w_1(entities, entity_mask,
                                   attn_mask=Wmask.reshape(bs * max_t,
-                                                          ne, ne))
+                                                          ne, ne)) #[4800,8,32]
             w1_I = self.hyper_w_1(entities, entity_mask,
                                   attn_mask=Imask.reshape(bs * max_t,
-                                                          ne, ne))
-            w1 = th.cat([w1_W, w1_I], dim=1)
+                                                          ne, ne)) #[4800,8,32]
+            w1 = th.cat([w1_W, w1_I], dim=1) #[4800,16,32]
         else:
-            agent_qs = agent_qs.view(-1, 1, self.n_agents)
+            agent_qs = agent_qs.reshape(-1, 1, self.n_agents)#[4800,1,8]
             # First layer
-            w1 = self.hyper_w_1(entities, entity_mask)
-        b1 = self.hyper_b_1(entities, entity_mask)
+            w1 = self.hyper_w_1(entities, entity_mask) #[4800,8,32]
+        b1 = self.hyper_b_1(entities, entity_mask) #[4800,32]
         w1 = w1.view(bs * max_t, -1, self.embed_dim)
         b1 = b1.view(-1, 1, self.embed_dim)
         if self.args.softmax_mixing_weights:
@@ -104,13 +104,13 @@ class FlexQMixer(nn.Module):
         else:
             w1 = th.abs(w1)
 
-        hidden = self.non_lin(th.bmm(agent_qs, w1) + b1)
+        hidden = self.non_lin(th.bmm(agent_qs, w1) + b1) #[4800,1,32]
         # Second layer
         if self.args.softmax_mixing_weights:
-            w_final = F.softmax(self.hyper_w_final(entities, entity_mask), dim=-1)
+            w_final = F.softmax(self.hyper_w_final(entities, entity_mask), dim=-1) #[4800,32]
         else:
             w_final = th.abs(self.hyper_w_final(entities, entity_mask))
-        w_final = w_final.view(-1, self.embed_dim, 1)
+        w_final = w_final.view(-1, self.embed_dim, 1) 
         # State-dependent bias
         v = self.V(entities, entity_mask).view(-1, 1, 1)
 

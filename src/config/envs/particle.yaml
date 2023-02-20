@@ -2,11 +2,13 @@ env: particle
 
 env_args:
   entity_scheme: True
-  scenario_id: "resource_collection.py"
+  scenario_id: "resource_collection.py" # "resource_collection.py"
   num_agents: 8
   num_resource: 6
   mining_radius: 0.2
   sight_range_kind: 1
+  sr_list: None
+  comm_sr:
   num_predator: 6
   num_prey: 2
 
@@ -16,4 +18,10 @@ log_interval: 10000
 runner_log_interval: 10000
 learner_log_interval: 10000
 t_max: 10000000
+
+render_args:
+  draw_sight_range: False
+  mode: 'rgb_array'
+  srk: [1,2,4]
+  sr_color: ["#2CAFAC","#FB5607", "#1982C4"]
 

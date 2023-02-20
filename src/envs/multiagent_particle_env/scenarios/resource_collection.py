@@ -8,12 +8,15 @@ class Scenario(BaseScenario):
                 num_agents=6, 
                 num_resource=6, 
                 mining_radius = 0.2,
+                comm_sr=None,
                 sight_range_kind = 1,):
         world = World()
         # add agents
         world.resource_kind=3
+        world.comm_mask = None
         # add landmarks
         world.landmarks = [Landmark() for i in range(num_resource)]
+        
         resource_kind = [0,0,1,1,2,2]
         for i, landmark in enumerate(world.landmarks):
             landmark.name = 'landmark %d' % i
@@ -34,37 +37,52 @@ class Scenario(BaseScenario):
         # make initial conditions
         world.ability_set = [0.1,0.5,0.9]
         world.max_speed_set = [0.3,0.5,0.7]
-        world.sight_range_set = [0.2, 0.5, 1, 0.8]
+        world.sight_range_set = [0.2, 0.5, 1, 0.8, 50, 1.5, 2.0]
         world.home = np.array([0.0, 0.0])
         
         world.max_n_agents = num_agents
         world.max_n_enemies = 0
         world.max_n_entities = 7 #entity without agents
-        world.max_entity_size = world.max_n_agents + world.max_n_enemies + world.max_n_entities
+        world.max_entity_size = 15
         world.episode_limit = 145
+        world.default_num_range = [3,4,5,6,7,8]
+        world.state_shape = world.max_entity_size * (world.max_n_agents+world.max_n_entities)
+        world.obs_shape = world.max_entity_size * (world.max_n_agents+world.max_n_entities)
         world.sight_range_kind = sight_range_kind
+        if comm_sr is not None:
+            world.comm_sr = comm_sr
+            world.return_comm_sr = True
+        else:
+            world.comm_sr = world.sight_range_set[world.sight_range_kind]
+            world.return_comm_sr = False
         self.reset_world(world, constrain_num=[num_agents])
         
-        return world
+        return world 
 
-    def reset_world(self, world, constrain_num=None):
+    def reset_world(self, world, constrain_num=None, sight_range_kind=None):
+        if sight_range_kind is not None:
+            world.sight_range_kind=sight_range_kind
         if constrain_num is not None:
             num_agents = np.random.choice(constrain_num)
-            world.agents = [Agent() for i in range(num_agents)]
-            for i, agent in enumerate(world.agents):
-                agent.name = 'agent %d' % i
-                agent.collide = True
-                agent.silent = True
-                agent.size = 0.05 
-                agent.accel = 3.0 
-                agent.max_speed = 1.0
-                agent.ability = [0.5]*world.resource_kind
-                agent.sight_range = world.sight_range_set[world.sight_range_kind]
+        else:
+            num_agents = np.random.choice(world.default_num_range)
+        world.agents = [Agent() for i in range(num_agents)]
+        for i, agent in enumerate(world.agents):
+            agent.name = 'agent %d' % i
+            agent.collide = True
+            agent.silent = True
+            agent.size = 0.05 
+            agent.accel = 3.0 
+            agent.max_speed = 1.0
+            agent.ability = [0.5]*world.resource_kind
+            agent.sight_range = world.sight_range_set[world.sight_range_kind]
+        
         # random properties for agents
         for i, agent in enumerate(world.agents):
             ability = np.random.randint(0,len(world.ability_set),world.resource_kind)
             agent.ability = [world.ability_set[i] for i in ability]
-            agent.color = agent.ability
+            # agent.color = agent.ability
+            agent.color = [0.5,0.5,0.5]
             agent.max_speed = world.max_speed_set[np.random.randint(0,len(world.max_speed_set))]
             #partially observable
             agent.sight_range = world.sight_range_set[world.sight_range_kind]
@@ -72,6 +90,8 @@ class Scenario(BaseScenario):
             if i < len(world.landmarks) -1:
                 landmark.color = np.array([0.25, 0.25, 0.25])
                 landmark.color[landmark.resource_kind] += 0.5
+            else:
+                landmark.color = np.array([0.855,0.216,0.506])
         # set random initial states
         for agent in world.agents:
             agent.state.p_pos = np.random.uniform(-0.2, +0.2, world.dim_p)
@@ -126,6 +146,7 @@ class Scenario(BaseScenario):
 
     def get_mask(self, world):
         #mask[i,j] =1 means i can not observe j
+        
         obs_mask = np.ones([world.max_n_agents+world.max_n_entities, world.max_n_agents+world.max_n_entities])
         for i, agent1 in enumerate(world.agents):
             for j, agent2 in enumerate(world.agents):
@@ -137,7 +158,24 @@ class Scenario(BaseScenario):
             obs_mask[i, world.max_n_agents+world.max_n_entities-1] = 0 #can observe home at anytime
         entity_mask = np.ones(world.max_n_agents + world.max_n_entities,dtype=np.uint8)
         entity_mask[:len(world.agents)] = 0
-        return obs_mask, entity_mask
+        entity_mask[world.max_n_agents:world.max_n_agents+world.max_n_entities] = 0
+        if world.return_comm_sr:
+            comm_mask = self.get_comm_mask(world)
+            return obs_mask, entity_mask, comm_mask
+        else:
+            return obs_mask, entity_mask
+    
+    def get_comm_mask(self, world):
+        obs_mask = np.ones([world.max_n_agents+world.max_n_entities, world.max_n_agents+world.max_n_entities])
+        for i, agent1 in enumerate(world.agents):
+            for j, agent2 in enumerate(world.agents):
+                if self.dist(agent1, agent2) <= world.comm_sr:
+                    obs_mask[i,j] = 0
+            for j, landmark in enumerate(world.landmarks):
+                if self.dist(agent1, landmark) <= world.comm_sr:
+                    obs_mask[i, world.max_n_agents+j] = 0
+            obs_mask[i, world.max_n_agents+world.max_n_entities-1] = 0 #can observe home at anytime
+        return obs_mask
     
     def done(self, world):
         return True if world.time_step >= world.episode_limit else False
@@ -158,4 +196,23 @@ class Scenario(BaseScenario):
                             r += 10 * agent.ability[landmark.resource_kind]
                             break
         return r
-        
+    
+    def get_obs(self, world):
+        obs_mask, entity_mask = self.get_mask(world)
+        entities = self.get_entity(world)
+        obs = []
+        for i in range(world.max_n_agents):
+            single_obs = []
+            for j in range(world.max_n_agents+world.max_n_entities):
+                if obs_mask[i,j]==0:
+                    single_obs.append(entities[j])
+                else:
+                    single_obs.append(np.zeros(world.max_entity_size))
+            obs.append(np.array(single_obs).flatten())
+        return obs
+
+
+
+    def get_state(self, world):
+        entities = self.get_entity(world)
+        return np.array(entities).flatten()

@@ -68,6 +68,7 @@ class StarCraft2Env(MultiAgentEnv):
         step_mul=8,
         move_amount=2,
         difficulty="7",
+        sight_range=9,
         game_version=None,
         seed=None,
         continuing_episode=False,
@@ -201,6 +202,7 @@ class StarCraft2Env(MultiAgentEnv):
         self.orgunits = map_params.get("orgunits", False)  # Map uses standard unit types rather than "*_RL" units
         self._move_amount = move_amount
         self._step_mul = step_mul
+        self._sight_range = sight_range
         self.difficulty = difficulty
 
         # Observations and state
@@ -299,7 +301,7 @@ class StarCraft2Env(MultiAgentEnv):
 
         # Setting up the interface
         interface_options = sc_pb.InterfaceOptions(raw=True, score=False)
-        self._sc2_proc = self._run_config.start(window_size=self.window_size)
+        self._sc2_proc = self._run_config.start(window_size=self.window_size, want_rgb=False)
         self._controller = self._sc2_proc.controller
 
         # Request to create the game
@@ -751,7 +753,7 @@ class StarCraft2Env(MultiAgentEnv):
 
     def unit_sight_range(self, agent_id):
         """Returns the sight range for an agent."""
-        return 9
+        return self._sight_range
 
     def unit_max_cooldown(self, unit):
         """Returns the maximal cooldown for a unit."""

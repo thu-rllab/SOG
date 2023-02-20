@@ -31,5 +31,7 @@ mac: "entity_mac"
 attn_embed_dim: 128
 attn_n_heads: 4
 lmbda: 0.5
+double_attn: False
 
 name: "qmix_atten"
+attn_head: 4

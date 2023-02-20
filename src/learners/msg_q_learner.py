@@ -1,10 +1,13 @@
 import copy
+from math import gamma
+
+from torch.serialization import validate_cuda_device
 from components.episode_buffer import EpisodeBatch
 from modules.mixers.vdn import VDNMixer
 from modules.mixers.qmix import QMixer
 from modules.mixers.flex_qmix import FlexQMixer, LinearFlexQMixer
 import torch as th
-from torch.optim import RMSprop
+from torch.optim import RMSprop, optimizer
 from torch.distributions import kl_divergence
 import torch.distributions as D
 
@@ -14,8 +17,11 @@ class MsgQLearner:
         self.args = args
         self.mac = mac
         self.logger = logger
-
-        self.params = list(mac.parameters())
+        if args.mac == "rlcomm_mac":
+            self.params = list(mac.parameters())
+            self.elector_params = list(mac.elector_parameters())
+        else:
+            self.params = list(mac.parameters())
 
         self.last_target_update_episode = 0
         self.mixer = None
@@ -37,11 +43,18 @@ class MsgQLearner:
 
         self.optimiser = RMSprop(params=self.params, lr=args.lr, alpha=args.optim_alpha, eps=args.optim_eps,
                                  weight_decay=args.weight_decay)
-
+        if args.mac == "rlcomm_mac":
+            self.elector_optim = RMSprop(params=self.elector_params, lr=args.lr,
+                alpha=args.optim_alpha, eps=args.optim_eps,
+                weight_decay=args.weight_decay)
         # a little wasteful to deepcopy (e.g. duplicates action selector), but should work for any MAC
         self.target_mac = copy.deepcopy(mac)
 
         self.log_stats_t = -self.args.learner_log_interval - 1
+        if args.mac == "rlcomm_mac":
+            self.log_stats_t_elector = -self.args.learner_log_interval - 1
+            # share the same head selector between target_mac and mac
+            self.target_mac.elector = self.mac.elector
 
     def _get_mixer_ins(self, batch, repeat_batch=1):
         if not self.args.entity_scheme:
@@ -177,18 +190,18 @@ class MsgQLearner:
         #maxmize the MI between message encoder and future T steps trajectories
         loss= q_loss
         if not self.args.no_summary:
-            msg_dis_inf = D.Normal(msg_dis_inf_mv.mean[:,self.args.msg_T-1:,:,:], msg_dis_inf_mv.scale[:,self.args.msg_T-1:,:,:])
-            msg_dis = D.Normal(msg_dis_mv.mean[:,:-self.args.msg_T+1,:,:], msg_dis_mv.scale[:,:-self.args.msg_T+1,:,:])
+            msg_dis_inf = D.Normal(msg_dis_inf_mv.mean[:,self.args.msg_T:,:,:], msg_dis_inf_mv.scale[:,self.args.msg_T:,:,:])
+            msg_dis = D.Normal(msg_dis_mv.mean[:,:-self.args.msg_T,:,:], msg_dis_mv.scale[:,:-self.args.msg_T,:,:])
             entropy_loss = -msg_dis.entropy().sum(dim=-1).mean() *self.args.msg_entropy_weight
             kl_loss = kl_divergence(msg_dis, msg_dis_inf).sum(dim=-1).mean() * self.args.msg_ce_weight
             loss += entropy_loss + kl_loss
             if self.args.ceb_weight > 0:
-                bs, t, ne, msg_d = msg_dis_mv.mean[:,:-self.args.msg_T+1,:,:].shape
+                bs, t, ne, msg_d = msg_dis_mv.mean[:,:-self.args.msg_T,:,:].shape
                 #Don't do softmax on time dimension since the limitation of CUDA memory.
-                da = D.Normal(msg_dis_mv.mean[:,:-self.args.msg_T+1,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d),\
-                            msg_dis_mv.scale[:,:-self.args.msg_T+1,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d))
-                db = D.Normal(msg_dis_inf_mv.mean[:,self.args.msg_T-1:,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d), \
-                            msg_dis_inf_mv.scale[:,self.args.msg_T-1:,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d))
+                da = D.Normal(msg_dis_mv.mean[:,:-self.args.msg_T,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d),\
+                            msg_dis_mv.scale[:,:-self.args.msg_T,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d))
+                db = D.Normal(msg_dis_inf_mv.mean[:,self.args.msg_T:,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d), \
+                            msg_dis_inf_mv.scale[:,self.args.msg_T:,:,:].permute(1,0,2,3).reshape(t, 1, bs*ne, msg_d))
 
                 z=da.sample() #bs*t*ne*msg_d
                 if self.args.ceb_kl_weight > 0:
@@ -277,3 +290,39 @@ class MsgQLearner:
             if self.mixer is not None:
                 self.mixer.load_state_dict(th.load("{}/mixer.th".format(path), map_location=lambda storage, loc: storage))
             self.optimiser.load_state_dict(th.load("{}/opt.th".format(path), map_location=lambda storage, loc: storage))
+    def train_elector(self, batch: EpisodeBatch, t_env:int, episode_num:int):
+        if self.args.mac == "rlcomm_mac":
+            # Get the relevant quantities
+            rewards = batch["reward"][:, :-1] # B, t_max, 1
+            pi = batch["head_probs"][:,:-1]
+            # TODO add terminated info into reward
+            terminated = th.cumsum(batch["terminated"][:, :-1].float(), dim=1)
+            # set elector net state
+            self.mac.elector.train()
+            # train
+            self.elector_optim.zero_grad()
+            bs, t_total, _ = rewards.shape
+            padding_sz = t_total%self.args.msg_T
+            padding_sz = 0 if padding_sz ==0 else self.args.msg_T-padding_sz
+            padding_reward = th.cat([rewards,
+                th.zeros(bs,padding_sz,1, device=rewards.device)], dim=1)
+            sum_reward = padding_reward.view(bs,
+                (t_total+padding_sz)//self.args.msg_T,self.args.msg_T,1).sum(dim=2) #B,N,1 
+            valid_pi=pi[:,::self.args.msg_T,:].clamp(min=1e-10)
+            valid_terminated = terminated[:,::self.args.msg_T]
+            sum_reward = (1-valid_terminated) * sum_reward # reward of game end is 0
+            R = 0.0
+            loss = 0.0
+            for t in range(sum_reward.shape[1]-1, -1, -1):
+                r = sum_reward[:,t,:]
+                prob = valid_pi[:,t,:]
+                R = r+self.args.gamma * R
+                loss += -th.log(prob)*R # loss for eafch game
+            # TODO: reasonable here?
+            loss = loss/th.sum(1-valid_terminated, dim=1).clamp(min=1.0)
+            loss = loss.mean()
+            loss.backward()
+            self.elector_optim.step()
+            if t_env - self.log_stats_t_elector >= self.args.learner_log_interval:
+                self.logger.log_stat("elector_loss", loss.item(), t_env)
+                self.log_stats_t_elector = t_env

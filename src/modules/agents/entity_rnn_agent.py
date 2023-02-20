@@ -13,23 +13,27 @@ class EntityAttentionRNNAgent(nn.Module):
         if args.pooling_type is None:
             self.attn = EntityAttentionLayer(args.attn_embed_dim,
                                              args.attn_embed_dim,
-                                             args.attn_embed_dim, args)
+                                             args.attn_embed_dim*(1+args.double_attn), args)
         else:
             self.attn = EntityPoolingLayer(args.attn_embed_dim,
                                            args.attn_embed_dim,
-                                           args.attn_embed_dim,
+                                           args.attn_embed_dim*(1+args.double_attn),
                                            args.pooling_type,
                                            args)
-        self.fc2 = nn.Linear(args.attn_embed_dim, args.rnn_hidden_dim)
+        self.fc2 = nn.Linear(args.attn_embed_dim*(1+args.self_loc+args.double_attn), args.rnn_hidden_dim)
         self.rnn = nn.GRUCell(args.rnn_hidden_dim, args.rnn_hidden_dim)
         msg_d = self.args.msg_dim if self.args.use_msg else 0
         self.fc3 = nn.Linear(args.rnn_hidden_dim+msg_d, args.n_actions)
+        if args.self_loc:
+            self.self_fc = nn.Linear(input_shape, args.attn_embed_dim)
+        self.attn_weights=None
 
     def init_hidden(self):
         # make hidden states on same device as model
+        self.attn_weights=None
         return self.fc1.weight.new(1, self.args.rnn_hidden_dim).zero_()
 
-    def forward(self, inputs, hidden_state, ret_attn_logits=None, msg=None):
+    def forward(self, inputs, hidden_state, ret_attn_logits=None, msg=None, ret_attn_weights=False):
         entities, obs_mask, entity_mask = inputs
         bs, ts, ne, ed = entities.shape
         entities = entities.reshape(bs * ts, ne, ed)
@@ -39,19 +43,29 @@ class EntityAttentionRNNAgent(nn.Module):
         x1 = F.relu(self.fc1(entities))
         attn_outs = self.attn(x1, pre_mask=obs_mask,
                               post_mask=agent_mask,
-                              ret_attn_logits=ret_attn_logits)
+                              ret_attn_logits=ret_attn_logits,
+                              ret_attn_weights=ret_attn_weights)
         if ret_attn_logits is not None:
             x2, attn_logits = attn_outs
+        elif ret_attn_weights:
+            x2, attn_weights = attn_outs
+            if self.attn_weights is None:
+                self.attn_weights = attn_weights
+            else:
+                self.attn_weights=th.cat([self.attn_weights, attn_weights], dim=0)
         else:
             x2 = attn_outs
         for i in range(self.args.repeat_attn):
-            x2 = self.attn(x2, pre_mask=obs_mask,
+            attn_outs = self.attn(x2, pre_mask=obs_mask,
                               post_mask=agent_mask,
                               ret_attn_logits=ret_attn_logits)
             if ret_attn_logits is not None:
                 x2, attn_logits = attn_outs
             else:
                 x2 = attn_outs
+        if self.args.self_loc:
+            loc = self.self_fc(entities[:, :self.args.n_agents])
+            x2 = th.cat([x2, loc], dim=2)
         x3 = F.relu(self.fc2(x2))
         x3 = x3.reshape(bs, ts, self.args.n_agents, -1)
 
@@ -63,7 +77,7 @@ class EntityAttentionRNNAgent(nn.Module):
             hs.append(h.reshape(bs, self.args.n_agents, self.args.rnn_hidden_dim))
         hs = th.stack(hs, dim=1)  # Concat over time
         if msg is not None:
-            hs = torch.cat([hs, msg], dim=3)
+            hs = th.cat([hs, msg], dim=3)
         q = self.fc3(hs)
         # zero out output for inactive agents
         q = q.reshape(bs, ts, self.args.n_agents, -1)
@@ -96,7 +110,10 @@ class ImagineEntityAttentionRNNAgent(EntityAttentionRNNAgent):
 
     def forward(self, inputs, hidden_state, imagine=False, **kwargs):
         if not imagine:
-            return super(ImagineEntityAttentionRNNAgent, self).forward(inputs, hidden_state)
+            if kwargs.get('ret_attn_weights', False):
+                return super(ImagineEntityAttentionRNNAgent, self).forward(inputs, hidden_state, ret_attn_weights=True)
+            else:
+                return super(ImagineEntityAttentionRNNAgent, self).forward(inputs, hidden_state)
         entities, obs_mask, entity_mask = inputs
         bs, ts, ne, ed = entities.shape
 

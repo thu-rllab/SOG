@@ -11,7 +11,7 @@ from utils.logging import get_logger
 import yaml
 import time
 
-from run import run
+from run import REGISTRY as run_REGISTRY
 
 SETTINGS['CAPTURE_MODE'] = "fd"  # set to "no" if you want to see stdout/stderr in console
 logger = get_logger()
@@ -32,7 +32,7 @@ def my_main(_run, _config, _log):
     config['env_args']['seed'] = config["seed"]
 
     # run the framework
-    run(_run, config, _log)
+    run_REGISTRY[_config['run']](_run, config, _log)
 
     # force exit
     os._exit(0)
@@ -56,7 +56,7 @@ def _get_config(params, arg_name, subfolder):
     if config_name is not None:
         with open(os.path.join(os.path.dirname(__file__), "config", subfolder, "{}.yaml".format(config_name)), "r") as f:
             try:
-                config_dict = yaml.load(f)
+                config_dict = yaml.load(f,Loader=yaml.FullLoader)#TODO
             except yaml.YAMLError as exc:
                 assert False, "{}.yaml error: {}".format(config_name, exc)
         return config_dict
@@ -76,11 +76,15 @@ if __name__ == '__main__':
 
     from copy import deepcopy
     params = deepcopy(sys.argv)
+    if not any(["--env-config" in s for s in params]):
+        params.append("--env-config=particle")
+    if not any(["--config" in s for s in params]):
+        params.append("--config=dppsocom")
 
     # Get the defaults from default.yaml
     with open(os.path.join(os.path.dirname(__file__), "config", "default.yaml"), "r") as f:
         try:
-            config_dict = yaml.load(f)
+            config_dict = yaml.load(f, Loader=yaml.FullLoader)
         except yaml.YAMLError as exc:
             assert False, "default.yaml error: {}".format(exc)
 
@@ -94,10 +98,19 @@ if __name__ == '__main__':
     # now add all the config to sacred
     ex.add_config(config_dict)
 
+    # get log dir
+    log_dir = config_dict['log_name']
+    for cur_dir in params:
+        if "log_name" in cur_dir:
+            log_dir = cur_dir.split("=")[1]
+
     if not config_dict['evaluate']:  # only log if training
         # Save to disk by default for sacred
         logger.info("Saving to FileStorageObserver in results/sacred.")
-        file_obs_path = os.path.join(results_path, "sacred")
+        if len(log_dir):
+            file_obs_path = os.path.join(results_path, "sacred", log_dir)
+        else:
+            file_obs_path = os.path.join(results_path, "sacred", config_dict['name'])
         while True:
             try:
                 ex.observers.append(FileStorageObserver.create(file_obs_path))

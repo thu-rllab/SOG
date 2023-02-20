@@ -14,13 +14,15 @@ runner_log_interval: 2000 # Log runner stats (not test stats) every {} timesteps
 learner_log_interval: 2000 # Log training stats every {} timesteps
 t_max: 10000 # Stop running after this many timesteps
 use_cuda: True # Use gpu by default unless it isn't available
-buffer_cpu_only: False # If true we won't keep all of the replay buffer in vram
-
+buffer_cpu_only: True # If true we won't keep all of the replay buffer in vram#TODO
+two_phase_decay: False
+grad_heat_map: False
 # --- Logging options ---
 use_tensorboard: True # Log results to tensorboard
 save_model: True # Save the models to disk
 save_model_interval: 2000000 # Save models after this many timesteps
 checkpoint_path: "" # Load a checkpoint from this path
+checkpoint_prefix: "" #prefix of ckpt_path, only valid for when evaluate_multi_model=True
 evaluate: False # Evaluate model for test_nepisode episodes and quit (no training)
 load_step: 0 # Load model trained on this many timesteps (0 if choose max possible)
 save_replay: False # Saving the replay of the model loaded from checkpoint_path
@@ -36,6 +38,7 @@ gamma: 0.99
 batch_size: 32 # Number of episodes to train on
 buffer_size: 32 # Size of the replay buffer
 lr: 0.0005 # Learning rate for agents
+optim: "RMSprop"
 optim_alpha: 0.99 # RMSProp alpha
 optim_eps: 0.00001 # RMSProp epsilon
 grad_norm_clip: 10 # Reduce magnitude of gradients above this L2 norm
@@ -47,6 +50,8 @@ agent: "rnn" # Default rnn agent
 rnn_hidden_dim: 64 # Size of hidden state for default rnn agent
 obs_agent_id: True # Include the agent's one_hot id in the observation
 obs_last_action: True # Include the agent's last action (one_hot) in the observation
+self_loc: False
+
 # This section is for the group matching game where we know the ground truth relevant entities to each agent
 gt_obs_mask: False # Use ground-truth observation mask
 train_gt_factors: False # Train w/ imagine groups automatically set to be ground-truth
@@ -68,3 +73,15 @@ test_map_num: [6,7,8]
 use_msg: False
 repeat_attn: 0
 render: False
+evaluate_multi_model: False
+run: "default"
+
+# --- Replay memory related ---
+save_memory: False
+save_interval: 5000
+save_entities_and_attn_weights: False
+save_global_attn: False
+use_comm_sr: False
+
+clusterer: "kmeans"
+log_name: ""

@@ -1,7 +1,7 @@
 import torch as th
 import numpy as np
 from types import SimpleNamespace as SN
-
+from torch.autograd import Variable
 
 class EpisodeBatch:
     def __init__(self,
@@ -65,7 +65,7 @@ class EpisodeBatch:
 
             if group:
                 assert group in groups, "Group {} must have its number of members defined in _groups_".format(group)
-                shape = (groups[group], *vshape)
+                shape = (groups[group], *vshape)# n_num, v_shape
             else:
                 shape = vshape
 
@@ -79,9 +79,15 @@ class EpisodeBatch:
 
     def to(self, device):
         for k, v in self.data.transition_data.items():
-            self.data.transition_data[k] = v.to(device)
+            if k=='obs' or k=='state':
+                self.data.transition_data[k] = Variable(v.to(device),requires_grad=True)
+            else:
+                self.data.transition_data[k] = v.to(device)
         for k, v in self.data.episode_data.items():
-            self.data.episode_data[k] = v.to(device)
+            if k=='obs' or k=='state':
+                self.data.episode_data[k] = Variable(v.to(device),requires_grad=True)
+            else:
+                self.data.episode_data[k] = v.to(device)
         self.device = device
 
     def update(self, data, bs=slice(None), ts=slice(None), mark_filled=True):
@@ -100,7 +106,12 @@ class EpisodeBatch:
                 raise KeyError("{} not found in transition or episode data".format(k))
 
             dtype = self.scheme[k].get("dtype", th.float32)
-            v = th.tensor(v, dtype=dtype, device=self.device)
+            if not th.is_tensor(v):
+                if type(v) == list:
+                    v=np.array(v)
+                v = th.tensor(v, dtype=dtype, device=self.device)
+            else:
+                v = v.to(self.device).to(dtype)
             self._check_safe_view(v, target[k][_slices])
             target[k][_slices] = v.view_as(target[k][_slices])
 
@@ -157,7 +168,6 @@ class EpisodeBatch:
 
             ret = EpisodeBatch(self.scheme, self.groups, ret_bs, ret_max_t, data=new_data, device=self.device)
             return ret
-
     def _get_num_items(self, indexing_item, max_size):
         if isinstance(indexing_item, list) or isinstance(indexing_item, np.ndarray):
             return len(indexing_item)
@@ -203,6 +213,11 @@ class EpisodeBatch:
                                                                                      self.scheme.keys(),
                                                                                      self.groups.keys())
 
+    def pop(self, k):
+        if k in self.data.transition_data:
+            del self.data.transition_data[k]
+        if k in self.data.episode_data:
+            del self.data.episode_data[k]
 class ReplayBuffer(EpisodeBatch):
     def __init__(self, scheme, groups, buffer_size, max_seq_length, preprocess=None, device="cpu"):
         super(ReplayBuffer, self).__init__(scheme, groups, buffer_size, max_seq_length, preprocess=preprocess, device=device)

@@ -19,16 +19,18 @@ class ParallelRunner:
         # TODO: Add a delay when making sc2 envs
         self.parent_conns, self.worker_conns = zip(*[Pipe() for _ in range(self.batch_size)])
         env_fn = env_REGISTRY[self.args.env]
-        if ('sc2' in self.args.env) or ('group_matching' in self.args.env) or ('particle' in self.args.env):
-            base_seed = self.args.env_args.pop('seed')
-            self.ps = [Process(target=env_worker, args=(worker_conn, self.args.entity_scheme,
-                                                        CloudpickleWrapper(partial(env_fn, seed=base_seed + rank,
-                                                                                   **self.args.env_args))))
-                       for rank, worker_conn in enumerate(self.worker_conns)]
-        else:
-            self.ps = [Process(target=env_worker, args=(worker_conn, self.args.entity_scheme,
-                                                        CloudpickleWrapper(partial(env_fn, env_args=self.args.env_args, args=self.args))))
-                       for worker_conn in self.worker_conns]
+        # if ('sc2' in self.args.env) or ('group_matching' in self.args.env)\
+        #      or ('particle' in self.args.env) or ('catch' in self.args.env):
+        base_seed = self.args.env_args.pop('seed')
+        self.ps = [Process(target=env_worker, args=(worker_conn, self.args.entity_scheme,
+                                                    CloudpickleWrapper(partial(env_fn, seed=base_seed + rank,
+                                                                                **self.args.env_args))))
+                    for rank, worker_conn in enumerate(self.worker_conns)]
+        self.args.env_args['seed']=base_seed
+        # else:
+        #     self.ps = [Process(target=env_worker, args=(worker_conn, self.args.entity_scheme,
+        #                                                 CloudpickleWrapper(partial(env_fn, env_args=self.args.env_args, args=self.args))))
+        #                for worker_conn in self.worker_conns]
 
         for p in self.ps:
             p.daemon = True
@@ -51,6 +53,7 @@ class ParallelRunner:
         self.test_stats = {}
 
         self.log_train_stats_t = -100000
+        self.n_agents = self.env_info["n_agents"]
 
     def setup(self, scheme, groups, preprocess, mac):
         self.new_batch = partial(EpisodeBatch, scheme, groups, self.batch_size, self.episode_limit + 1,
@@ -106,14 +109,20 @@ class ParallelRunner:
             constrain_num=self.args.test_map_num if test_mode else self.args.train_map_num
         else:
             constrain_num=None
-        self.reset(test=test_scen, index=index, constrain_num=constrain_num)
+        if self.args.env == "traffic_junction":
+            self.reset(t_env=self.t_env)
+        else:
+            self.reset(test=test_scen, index=index, constrain_num=constrain_num)
 
         all_terminated = False
         episode_returns = [0 for _ in range(self.batch_size)]
         episode_lengths = [0 for _ in range(self.batch_size)]
         self.mac.init_hidden(batch_size=self.batch_size)
         # make sure things like dropout are disabled
-        self.mac.eval()
+        if test_mode:
+            self.mac.eval()
+        else:
+            self.mac.train()
         terminated = [False for _ in range(self.batch_size)]
         envs_not_terminated = [b_idx for b_idx, termed in enumerate(terminated) if not termed]
         final_env_infos = []  # may store extra stats like battle won. this is filled in ORDER OF TERMINATION
@@ -122,7 +131,8 @@ class ParallelRunner:
 
             # Pass the entire batch of experiences up till now to the agents
             # Receive the actions for each agent at this timestep in a batch for each un-terminated env
-            if self.args.mac == "comm_mac":
+            # TODO: find a bug here
+            if self.args.mac == "comm_mac" or self.args.mac=="heucomm_mac" or self.args=="dppcomm_mac":
                 actions, p_msg, h_msg = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, bs=envs_not_terminated, test_mode=test_mode, ret_msg=True)
                 cpu_actions = actions.to("cpu").numpy()
                 cpu_p_msg = p_msg.detach().cpu().numpy()
@@ -132,8 +142,37 @@ class ParallelRunner:
                     "self_message": cpu_p_msg,
                     "head_message": cpu_h_msg
                 }
+            elif self.args.mac == "rlcomm_mac":
+                actions, p_msg, h_msg, head_prob, election_actions = self.mac.select_actions(
+                    self.batch, t_ep = self.t, t_env = self.t_env, bs=envs_not_terminated,
+                    test_mode=test_mode, ret_msg=True)
+                cpu_actions = actions.to("cpu").numpy()
+                cpu_p_msg = p_msg.detach().cpu().numpy()
+                cpu_h_msg = h_msg.detach().cpu().numpy()
+                actions_chosen = {
+                    "actions": actions.unsqueeze(1),
+                    "self_message": cpu_p_msg,
+                    "head_message": cpu_h_msg
+                }
+                # TODO: complete here???
+                if head_prob is None:
+                    bs = len(envs_not_terminated)
+                    head_chosen = {
+                        "head_probs": -1.0*np.ones((bs, 1)).astype(np.float32),
+                        "head_actions": np.ones((bs, self.env_info["n_agents"])).astype(np.float32)
+                    }
+                else:
+                    # TODO: we needs bp here
+                    head_chosen = {
+                        "head_probs": head_prob[envs_not_terminated],
+                        "head_actions": election_actions[envs_not_terminated], 
+                    }
+                actions_chosen.update(head_chosen)
             else:
-                actions = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, bs=envs_not_terminated, test_mode=test_mode)
+                if self.args.save_entities_and_attn_weights:
+                    actions = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, bs=envs_not_terminated, test_mode=test_mode, ret_attn_weights=True)
+                else:
+                    actions = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, bs=envs_not_terminated, test_mode=test_mode)
                 cpu_actions = actions.to("cpu").numpy()
 
             # Update the actions taken
@@ -232,12 +271,23 @@ class ParallelRunner:
         cur_stats.update({k: sum(d.get(k, 0) for d in infos) for k in set.union(*[set(d) for d in infos])})
         cur_stats["n_episodes"] = self.batch_size + cur_stats.get("n_episodes", 0)
         cur_stats["ep_length"] = sum(episode_lengths) + cur_stats.get("ep_length", 0)
+        if self.args.entity_scheme:
+            vis, vis_b10, vis_p10  = self.calc_visibility(self.batch["obs_mask"], self.batch["entity_mask"], entities = self.batch["entities"])
+            cur_stats["visibility"] = sum(vis) + cur_stats.get("visibility", 0)
+            cur_stats["visibility_b10"] = sum(vis_b10) + cur_stats.get("visibility_b10", 0)
+            cur_stats["visibility_p10"] = sum(vis_p10) + cur_stats.get("visibility_p10", 0)
+        # vis, vis_b10, vis_p10  = self.calc_visibility(self.batch["obs_mask"], self.batch["entity_mask"], entities = self.batch["entities"])
+        # cur_stats["visibility"] = sum(vis) + cur_stats.get("visibility", 0)
+        # cur_stats["visibility_b10"] = sum(vis_b10) + cur_stats.get("visibility_b10", 0)
+        # cur_stats["visibility_p10"] = sum(vis_p10) + cur_stats.get("visibility_p10", 0)
+        
+
 
         cur_returns.extend(episode_returns)
 
         n_test_runs = max(1, self.args.test_nepisode // self.batch_size) * self.batch_size
         if test_mode and (len(self.test_returns) == n_test_runs):
-            self._log(cur_returns, cur_stats, log_prefix)
+            self.rm = self._log(cur_returns, cur_stats, log_prefix)
         elif not test_mode and self.t_env - self.log_train_stats_t >= self.args.runner_log_interval:
             self._log(cur_returns, cur_stats, log_prefix)
             if hasattr(self.mac.action_selector, "epsilon"):
@@ -247,18 +297,41 @@ class ParallelRunner:
                                      sum(es['restarts'] for es in env_stats),
                                      self.t_env)
             self.log_train_stats_t = self.t_env
-
         return self.batch
 
     def _log(self, returns, stats, prefix):
+        rm = np.mean(returns)
         self.logger.log_stat(prefix + "return_mean", np.mean(returns), self.t_env)
         self.logger.log_stat(prefix + "return_std", np.std(returns), self.t_env)
         returns.clear()
-
         for k, v in stats.items():
             if k != "n_episodes":
                 self.logger.log_stat(prefix + k + "_mean", v / stats["n_episodes"], self.t_env)
         stats.clear()
+        return rm
+
+    def calc_visibility(self, obs_mask, agent_mask, entities=None):#[bs,t,ne,ne]; #[bs,t,ne,edim]
+        health_ind = {"3-8sz_symmetric": 30, "3-8MMM_symmetric": 39, "3-8csz_symmetric": 31}
+        if 'sc2custom' in self.args.env:
+            ind =health_ind[self.args.scenario]
+            agent_mask = (entities[:,:,:,ind] > 0).float() #In sc2custom, agent_mask includes the dead agents.
+        else:
+            agent_mask = 1-agent_mask
+        obs_mask = 1-obs_mask
+        obs_mask = obs_mask.masked_fill((1-agent_mask).bool().unsqueeze(-1),0)
+        agent_num = agent_mask[:, :, :self.n_agents].sum(2) #[bs,t]
+        entity_num = agent_mask.sum(2) #[bs,t]
+        invalid_frame = th.logical_or((agent_num == 0), (entity_num == 0)) #[bs,t]
+        seen_num=obs_mask.sum(3) #[bs,t,ne]
+        vis_percent = seen_num[:,:,:self.n_agents].sum(2)/agent_num/entity_num #[bs,ts]
+        vis_percent = vis_percent.masked_fill(invalid_frame, 0.0)
+        t_length = th.logical_not(invalid_frame).sum(1) #[bs]
+        visibility = (vis_percent.sum(1)/t_length).detach().cpu().numpy()
+        t_length0 = th.logical_not(invalid_frame)[:,:10].sum(1)
+        t_length1 = th.logical_not(invalid_frame)[:,10:].sum(1)
+        visibility0 = (vis_percent[:,:10].sum(1)/t_length0).detach().cpu().numpy()
+        visibility1 = (vis_percent[:,10:].sum(1)/t_length1).detach().cpu().numpy()
+        return visibility, visibility0, visibility1
 
 
 def env_worker(remote, entity_scheme, env_fn):

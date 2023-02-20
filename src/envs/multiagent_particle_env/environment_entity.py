@@ -19,11 +19,13 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
                 num_resource=6, 
                 mining_radius=0.2, 
                 seed=None, 
+                comm_sr=None, 
                 entity_scheme=True,
                 sight_range_kind = 1, 
                 num_predator = 6, 
                 num_prey = 2,
-                shared_viewer=True):
+                shared_viewer=True,
+                **kwargs):
         np.random.seed(seed)
         self.entity_scheme = entity_scheme
         scenario = sload(scenario_id).Scenario()
@@ -31,7 +33,8 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
             self.world = scenario.make_world(num_agents=num_agents, 
                                         num_resource=num_resource, 
                                         mining_radius=mining_radius, 
-                                        sight_range_kind=sight_range_kind,)
+                                        sight_range_kind=sight_range_kind,
+                                        comm_sr=comm_sr,)
         elif scenario_id == "predator_prey.py":
             # The predator_prey must be reset with args constrain_num!
             self.world = scenario.make_world(num_predator=num_predator, 
@@ -43,11 +46,12 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
         # scenario callbacks
         self.reset_callback = scenario.reset_world
         self.reward_callback = scenario.reward
-        self.observation_callback = None
         self.info_callback = None
         self.done_callback = scenario.done
         self.entity_callback = scenario.get_entity
         self.mask_callback = scenario.get_mask
+        self.observation_callback = scenario.get_obs
+        self.state_callback = scenario.get_state
         # environment parameters
         self.discrete_action_space = True
         # if true, action is a number 0...N, otherwise action is a one-hot N-dimensional vector
@@ -114,7 +118,7 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
 
     def reset(self, constrain_num=None, test=False, index=None):
         # reset world
-        self.reset_callback(self.world, constrain_num=constrain_num)
+        self.reset_callback(self.world, constrain_num=constrain_num, sight_range_kind=index)
         # reset renderer
         self._reset_render()
         # record observations for each agent
@@ -126,6 +130,16 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
         if self.entity_callback is None:
             return None
         return self.entity_callback(self.world)
+    
+    def get_obs(self):
+        if self.observation_callback is None:
+            return None
+        return self.observation_callback(self.world)
+
+    def get_state(self):
+        if self.state_callback is None:
+            return None
+        return self.state_callback(self.world)
 
     def get_masks(self):
         if self.mask_callback is None:
@@ -137,7 +151,9 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
                     "n_actions": 6,
                     "n_agents": self.world.max_n_agents,
                     "n_entities": self.world.max_n_agents + self.world.max_n_enemies+self.world.max_n_entities,
-                    "episode_limit": self.world.episode_limit}
+                    "episode_limit": self.world.episode_limit,
+                    "state_shape":self.world.state_shape,
+                    "obs_shape":self.world.obs_shape}
         return env_info
     
     def get_avail_actions(self):
@@ -227,7 +243,7 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
         self.render_geoms_xform = None
 
     # render environment
-    def render(self, mode='human'):
+    def render(self, mode='human', draw_sight_range=False, srk=[1,2,4], sr_color=["#2CAFAC","#FB5607", "#1982C4"]):
         if mode == 'human':
             alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
             message = ''
@@ -267,6 +283,17 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
                 geom.add_attr(xform)
                 self.render_geoms.append(geom)
                 self.render_geoms_xform.append(xform)
+            if draw_sight_range:
+                agent = self.world.agents[0]
+                for sr, color in zip(srk, sr_color):
+                    geom = rendering.make_circle(self.world.sight_range_set[sr], filled=False)
+                    xform = rendering.Transform()
+                    color = color[1:]
+                    c = [int(color[i:i+2], 16)/255 for i in (0, 2, 4)]
+                    geom.set_color(*c, alpha=1.0)
+                    geom.add_attr(xform)
+                    self.render_geoms.append(geom)
+                    self.render_geoms_xform.append(xform)
 
             # add geoms to viewer
             for viewer in self.viewers:
@@ -287,10 +314,13 @@ class MultiAgentParticleEnv(gym.Env, MultiAgentEnv):
             # update geometry positions
             for e, entity in enumerate(self.world.entities):
                 self.render_geoms_xform[e].set_translation(*entity.state.p_pos)
+            if draw_sight_range:
+                for j in range(len(srk)):
+                    self.render_geoms_xform[len(self.world.entities)+j].set_translation(*self.world.agents[0].state.p_pos)
             # render to display or array
             results.append(self.viewers[i].render(return_rgb_array = mode=='rgb_array'))
 
-        return results
+        return results[0]
 
     # create receptor field locations in local coordinate frame
     def _make_receptor_locations(self, agent):

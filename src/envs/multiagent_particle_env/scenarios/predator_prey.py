@@ -22,6 +22,8 @@ class Scenario(BaseScenario):
         world.num_landmark = num_landmark
         world.catching_range = catching_range
         world.num_hole = num_hole
+        world.state_shape = None
+        world.obs_shape = None
         for i, landmark in enumerate(world.landmarks):
             landmark.name = 'landmark %d' % i
             landmark.movable = False
@@ -37,6 +39,8 @@ class Scenario(BaseScenario):
         world.max_entity_size = 10
         world.max_n_agents = num_predator
         world.max_n_enemies = num_prey
+        world.default_predator_range=[3,4,5,6]
+        world.default_prey_range=[1,2]
         world.max_n_entities = num_landmark+num_hole #entity without agents
         world.episode_limit = 145
         world.sight_range_kind = sight_range_kind
@@ -63,36 +67,43 @@ class Scenario(BaseScenario):
         action.u *= sensitivity
         return action
 
-    def reset_world(self, world, constrain_num=None):
+    def reset_world(self, world, constrain_num=None, sight_range_kind=None):
+        if sight_range_kind is not None:
+            world.sight_range_kind=sight_range_kind
         if constrain_num is not None:
             num_predator = np.random.choice(constrain_num[0])
-            world.num_predator = num_predator
-            agent_pred = [Agent() for i in range(num_predator)]
-            for i, agent in enumerate(agent_pred):
-                agent.name = 'predator %d' % i
-                agent.collide = True
-                agent.silent = True
-                agent.size = 0.05 
-                agent.color = np.array([0.25,0.75,0.25])
-                agent.accel = 3.0
-                agent.is_pred=True 
-                agent.max_speed = np.random.choice(world.max_speed_pred_set)
-                agent.sight_range = world.sight_range_set[world.sight_range_kind]
             num_prey = np.random.choice(constrain_num[1])
-            agent_prey = [Agent() for i in range(num_prey)]
-            for i, agent in enumerate(agent_prey):
-                agent.name = 'prey %d' % i
-                agent.collide = True
-                agent.silent = True
-                agent.size = 0.05 
-                agent.accel = 4.5 
-                agent.color = np.array([0.75,0.25,0.25])
-                agent.is_pred = False
-                agent.max_speed = np.random.choice(world.max_speed_prey_set)
-                agent.sight_range = world.sight_range_set[world.sight_range_kind]
-                agent.catching_range = world.catching_range
-                agent.action_callback = self.random_action
-            world.agents = agent_pred + agent_prey
+        else:
+            num_predator = np.random.choice(world.default_predator_range)
+            num_prey = np.random.choice(world.default_prey_range)
+
+        world.num_predator = num_predator
+        agent_pred = [Agent() for i in range(num_predator)]
+        for i, agent in enumerate(agent_pred):
+            agent.name = 'predator %d' % i
+            agent.collide = True
+            agent.silent = True
+            agent.size = 0.05 
+            agent.color = np.array([0.25,0.75,0.25])
+            agent.accel = 3.0
+            agent.is_pred=True 
+            agent.max_speed = np.random.choice(world.max_speed_pred_set)
+            agent.sight_range = world.sight_range_set[world.sight_range_kind]
+        
+        agent_prey = [Agent() for i in range(num_prey)]
+        for i, agent in enumerate(agent_prey):
+            agent.name = 'prey %d' % i
+            agent.collide = True
+            agent.silent = True
+            agent.size = 0.05 
+            agent.accel = 4.5 
+            agent.color = np.array([0.75,0.25,0.25])
+            agent.is_pred = False
+            agent.max_speed = np.random.choice(world.max_speed_prey_set)
+            agent.sight_range = world.sight_range_set[world.sight_range_kind]
+            agent.catching_range = world.catching_range
+            agent.action_callback = self.random_action
+        world.agents = agent_pred + agent_prey
         # random properties for agents
         for i, agent in enumerate(world.agents):
             speed_set = world.max_speed_pred_set if i < world.num_predator else world.max_speed_prey_set
@@ -234,6 +245,11 @@ class Scenario(BaseScenario):
         entity_mask = np.ones(world.max_n_agents +world.max_n_enemies+ world.max_n_entities,dtype=np.uint8)
         entity_mask[:len(predator)] = 0
         return obs_mask, entity_mask
+
+    def get_obs(self, world):
+        return None
+    def get_state(self, world):
+        return None
         
     
     

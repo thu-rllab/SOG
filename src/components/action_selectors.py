@@ -40,12 +40,16 @@ class EpsilonGreedyActionSelector():
 
         # Was there so I used it
         self.schedule = DecayThenFlatSchedule(args.epsilon_start, args.epsilon_finish, args.epsilon_anneal_time, decay="linear")
+        if self.args.two_phase_decay:
+            self.schedule1 = DecayThenFlatSchedule(args.epsilon1_start, args.epsilon1_finish, args.epsilon1_anneal_time, decay="linear")
         self.epsilon = self.schedule.eval(0)
 
     def select_action(self, agent_inputs, avail_actions, t_env, test_mode=False):
 
         # Assuming agent_inputs is a batch of Q-Values for each agent bav
         self.epsilon = self.schedule.eval(t_env)
+        if self.args.two_phase_decay:
+            self.epsilon = max(self.epsilon,self.schedule1.eval(t_env))
 
         if test_mode:
             # Greedy action selection only

@@ -8,18 +8,23 @@ class BasicMAC:
     def __init__(self, scheme, groups, args):
         self.n_agents = args.n_agents
         self.args = args
+        self.scheme = scheme
         input_shape = self._get_input_shape(scheme)
-        self._build_agents(input_shape)
+        self.input_shape = input_shape
+        self._build_agents(input_shape, scheme=scheme)
         self.agent_output_type = args.agent_output_type
 
         self.action_selector = action_REGISTRY[args.action_selector](args)
 
         self.hidden_states = None
 
-    def select_actions(self, ep_batch, t_ep, t_env, bs=slice(None), test_mode=False, ret_agent_outs=False):
+    def select_actions(self, ep_batch, t_ep, t_env, bs=slice(None), test_mode=False, ret_agent_outs=False, ret_attn_weights=False):
         # Only select actions for the selected batch elements in bs
         avail_actions = ep_batch["avail_actions"][:, t_ep]
-        agent_outputs = self.forward(ep_batch, t_ep, test_mode=test_mode)
+        if ret_attn_weights:
+            agent_outputs = self.forward(ep_batch, t_ep, test_mode=test_mode, ret_attn_weights=True)
+        else:
+            agent_outputs = self.forward(ep_batch, t_ep, test_mode=test_mode)
         chosen_actions = self.action_selector.select_action(agent_outputs[bs], avail_actions[bs], t_env, test_mode=test_mode)
         if ret_agent_outs:
             return chosen_actions, agent_outputs[bs]
@@ -37,6 +42,8 @@ class BasicMAC:
         avail_actions = ep_batch["avail_actions"][:, t]
         if kwargs.get('imagine', False):
             agent_outs, self.hidden_states, groups = self.agent(agent_inputs, self.hidden_states, **kwargs)
+        elif kwargs.get('ret_attn_weights', False):
+            agent_outs, self.hidden_states = self.agent(agent_inputs, self.hidden_states, ret_attn_weights=True)
         else:
             agent_outs, self.hidden_states = self.agent(agent_inputs, self.hidden_states)
 
@@ -90,8 +97,11 @@ class BasicMAC:
     def load_models(self, path):
         self.agent.load_state_dict(th.load("{}/agent.th".format(path), map_location=lambda storage, loc: storage))
 
-    def _build_agents(self, input_shape):
-        self.agent = agent_REGISTRY[self.args.agent](input_shape, self.args)
+    def _build_agents(self, input_shape, scheme = None):
+        if "vae" in self.args.agent:
+            self.agent = agent_REGISTRY[self.args.agent](input_shape, self.args, scheme=scheme)
+        else:
+            self.agent = agent_REGISTRY[self.args.agent](input_shape, self.args)
 
     def _build_inputs(self, batch, t):
         # Assumes homogenous agents with flat observations.

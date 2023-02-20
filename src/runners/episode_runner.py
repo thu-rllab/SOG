@@ -12,7 +12,13 @@ class EpisodeRunner:
         self.batch_size = self.args.batch_size_run
         assert self.batch_size == 1
 
-        if ('sc2' in self.args.env) or ('group_matching' in self.args.env) or ('particle' in self.args.env):
+        if ('sc2' in self.args.env) or ('group_matching' in self.args.env) or \
+            ('particle' in self.args.env) or ('catch' in self.args.env):
+            self.env = env_REGISTRY[self.args.env](**self.args.env_args)
+        ###0107###
+        elif 'meltingpot' in self.args.env:
+            self.args.env_args["env_id"]=0
+            self.args.env_args["device"]=self.args.device
             self.env = env_REGISTRY[self.args.env](**self.args.env_args)
         else:
             self.env = env_REGISTRY[self.args.env](env_args=self.args.env_args, args=args)
@@ -73,7 +79,7 @@ class EpisodeRunner:
             }
         return pre_transition_data
 
-    def run(self, test_mode=False, test_scen=None, index=None, vid_writer=None):
+    def run(self, test_mode=False, test_scen=None, index=None, vid_writer=None, **kwargs):
         """
         test_mode: whether to use greedy action selection or sample actions
         test_scen: whether to run on test scenarios. defaults to matching test_mode.
@@ -87,9 +93,10 @@ class EpisodeRunner:
             constrain_num=None
         self.reset(test=test_scen, index=index, constrain_num=constrain_num)
         if vid_writer is not None:
-            vid_writer.append_data(self.env.render())
+            vid_writer.append_data(self.env.render(**self.args.render_args))
         else:
-            self.env.render()
+            # pass
+            self.env.render(**self.args.render_args)
         terminated = False
         episode_return = 0
         self.mac.init_hidden(batch_size=self.batch_size)
@@ -109,9 +116,9 @@ class EpisodeRunner:
                 actions = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, test_mode=test_mode)
             reward, terminated, env_info = self.env.step(actions[0].cpu())
             if vid_writer is not None:
-                vid_writer.append_data(self.env.render())
+                vid_writer.append_data(self.env.render(**self.args.render_args))
             elif self.args.render:
-                self.env.render()
+                self.env.render(**self.args.render_args)
             episode_return += reward
 
             post_transition_data = {
@@ -151,8 +158,8 @@ class EpisodeRunner:
         cur_returns.append(episode_return)
 
         if test_mode and (len(self.test_returns) == self.args.test_nepisode):
-            self._log(cur_returns, cur_stats, log_prefix)
-        elif self.t_env - self.log_train_stats_t >= self.args.runner_log_interval:
+            self.rm = self._log(cur_returns, cur_stats, log_prefix)
+        elif not test_mode and self.t_env - self.log_train_stats_t >= self.args.runner_log_interval:
             self._log(cur_returns, cur_stats, log_prefix)
             if hasattr(self.mac.action_selector, "epsilon"):
                 self.logger.log_stat("epsilon", self.mac.action_selector.epsilon, self.t_env)
@@ -161,6 +168,7 @@ class EpisodeRunner:
         return self.batch
 
     def _log(self, returns, stats, prefix):
+        rm = np.mean(returns)
         self.logger.log_stat(prefix + "return_mean", np.mean(returns), self.t_env)
         self.logger.log_stat(prefix + "return_std", np.std(returns), self.t_env)
         returns.clear()
@@ -169,3 +177,4 @@ class EpisodeRunner:
             if k != "n_episodes":
                 self.logger.log_stat(prefix + k + "_mean" , v/stats["n_episodes"], self.t_env)
         stats.clear()
+        return rm 

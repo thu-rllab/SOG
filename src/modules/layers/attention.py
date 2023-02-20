@@ -18,11 +18,11 @@ class EntityAttentionLayer(nn.Module):
         self.register_buffer('scale_factor',
                              th.scalar_tensor(self.head_dim).sqrt())
         self.in_trans = nn.Linear(self.in_dim, self.embed_dim * 3, bias=False)
-        if self.args.repeat_attn > 0:
+        if self.args.__dict__.get('repeat_attn', 0) > 0:
             assert in_dim == out_dim
         self.out_trans = nn.Linear(self.embed_dim, self.out_dim)
 
-    def forward(self, entities, pre_mask=None, post_mask=None, ret_attn_logits=None):
+    def forward(self, entities, pre_mask=None, post_mask=None, ret_attn_logits=None, ret_attn_weights=False, rank_percent=None, entity_mask=None):
         """
         entities: Entity representations
             shape: batch size, # of entities, embedding dimension
@@ -37,12 +37,14 @@ class EntityAttentionLayer(nn.Module):
             None: do not return
             "max": take max over heads
             "mean": take mean over heads
+        rank_percent: leave how much percent of available entities
+        entity_mask: just for calc available number of entities
 
         Return shape: batch size, # of agents, embedding dimension
         """
         entities_t = entities.transpose(0, 1) #ne*bs*edim
         n_queries = post_mask.shape[1] #na
-        pre_mask = pre_mask[:, :n_queries] #bs*na*ne
+        
         ne, bs, ed = entities_t.shape
         query, key, value = self.in_trans(entities_t).chunk(3, dim=2) #ne*bs*ed  * 3
 
@@ -54,8 +56,29 @@ class EntityAttentionLayer(nn.Module):
 
         attn_logits = th.bmm(query_spl, key_spl) / self.scale_factor #(bs*n_head)*na*ne
         if pre_mask is not None:
-            pre_mask_rep = pre_mask.repeat_interleave(self.n_heads, dim=0) #(bs*n_head)*na*ne
+            pre_mask = pre_mask[:, :n_queries] #bs*na*ne
+            if pre_mask.shape[0] == bs * self.n_heads:
+                pre_mask_rep = pre_mask
+            else:
+                pre_mask_rep = pre_mask.repeat_interleave(self.n_heads, dim=0) #(bs*n_head)*na*ne
             masked_attn_logits = attn_logits.masked_fill(pre_mask_rep[:, :, :ne].bool(), -float('Inf'))
+            if rank_percent is not None:
+                _, ind = masked_attn_logits.sort(2) #(bs*n_head)*na*ne
+                with th.no_grad():
+                    max_n = (1-entity_mask).sum(1) #bs
+                    left_n = (max_n * rank_percent).ceil().long() #bs
+                    arange_ind = th.arange(ne).unsqueeze(0).repeat(bs,1).to(entities_t.device) #bs, ne
+                    left_ind = th.where(arange_ind>=(ne-left_n).unsqueeze(1),0,1)#bs, ne
+                    expanded_left_ind = left_ind.repeat_interleave(self.n_heads,dim=0).unsqueeze(1).repeat(1,n_queries,1) #bs*nhead, na, ne
+                    left_mask = th.ones_like(masked_attn_logits).flatten()
+                    dk = th.arange(bs*self.n_heads*n_queries).unsqueeze(1).reshape(bs*self.n_heads,n_queries,1).to(entities_t.device)*ne
+                    left_mask[(dk+ind)[expanded_left_ind==0]]=0
+                    left_mask=left_mask.reshape(bs*self.n_heads, n_queries, ne) # 1 need mask, 0 remains valid. bs*nhead, na, ne
+                masked_attn_logits = masked_attn_logits.masked_fill(left_mask.bool(), -float('Inf'))
+                true_pre_mask = left_mask + pre_mask_rep #should be the intersection of left_mask and pre_mask_rep
+                true_pre_mask[true_pre_mask>1] = 1
+
+
         attn_weights = F.softmax(masked_attn_logits, dim=2)
         # some weights might be NaN (if agent is inactive and all entities were masked)
         attn_weights = attn_weights.masked_fill(attn_weights != attn_weights, 0)
@@ -77,6 +100,10 @@ class EntityAttentionLayer(nn.Module):
             elif ret_attn_logits == 'norm':
                 attn_logits = attn_logits.mean(dim=1)
             return attn_outs, attn_logits
+        if ret_attn_weights:
+            attn_outs = (attn_outs, attn_weights)
+        if rank_percent is not None:
+            return attn_outs, true_pre_mask
         return attn_outs
 
 

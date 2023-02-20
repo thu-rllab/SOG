@@ -45,5 +45,11 @@ random_master: True
 ceb_weight: 0.01
 ceb_kl_weight: 0.01
 generation_alpha: 1.0
+use_comm_sr: False
 no_summary: False
 no_feedback: False
+order_leader: False
+select_by_prob: False
+
+# communication type
+only_use_head_msg: 0

@@ -1,5 +1,5 @@
 env: sc2custom
-scenario: "1-5m_symmetric"
+scenario: "3-8sz_symmetric" # "3-8sz_symmetric" "3-8csz_symmetric" "3-8MMM_symmetric"
 
 env_args:
   entity_scheme: True
@@ -40,3 +40,4 @@ log_interval: 10000
 runner_log_interval: 10000
 learner_log_interval: 10000
 t_max: 10000000
+render_args:

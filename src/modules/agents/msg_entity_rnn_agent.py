@@ -37,7 +37,8 @@ class MessageEntityAttentionRNNAgent(nn.Module):
         # make hidden states on same device as model
         return self.fc1.weight.new(1, self.args.rnn_hidden_dim).zero_()
 
-    def forward(self, inputs, hidden_state, ret_attn_logits=None, msg=None, ret_inf_msg=False, imagine=False, **kwargs):
+    def forward(self, inputs, hidden_state, ret_attn_logits=None, msg=None, ret_inf_msg=False, imagine=False,
+                ret_attn_input=False, **kwargs):
         entities, obs_mask, entity_mask = inputs
         bs, ts, ne, ed = entities.shape
         entity_mask = entity_mask.reshape(bs * ts, ne)
@@ -83,8 +84,12 @@ class MessageEntityAttentionRNNAgent(nn.Module):
                 inference_logstd = self.max_logvar - F.softplus(self.max_logvar - x4[:,:,:,self.args.msg_dim:])
                 inference_logstd = self.min_logvar + F.softplus(inference_logstd - self.min_logvar)
                 inference_dis = th.distributions.Normal(inference_mean, inference_logstd.exp())
+                if ret_attn_input:
+                    return  dis.rsample(), dis, inference_dis, x2
                 return dis.rsample(), dis, inference_dis
             else:
+                if ret_attn_input:
+                    return  dis.rsample(), dis, x2
                 return dis.rsample(), dis
 
         else:

@@ -3,6 +3,7 @@ from components.episode_buffer import EpisodeBatch
 from modules.mixers.vdn import VDNMixer
 from modules.mixers.qmix import QMixer
 from modules.mixers.flex_qmix import FlexQMixer, LinearFlexQMixer
+from modules.mixers.weighted_vdn import WVDNMixer
 import torch as th
 from torch.optim import RMSprop
 
@@ -12,7 +13,8 @@ class QLearner:
         self.args = args
         self.mac = mac
         self.logger = logger
-
+        self.local_q_weight=None
+        self.unnorm_local_q_weight = None
         self.params = list(mac.parameters())
 
         self.last_target_update_episode = 0
@@ -29,6 +31,9 @@ class QLearner:
             elif args.mixer == "lin_flex_qmix":
                 assert args.entity_scheme, "FlexQMixer only available with entity scheme"
                 self.mixer = LinearFlexQMixer(args)
+            elif args.mixer == "wvdn":
+                assert args.entity_scheme, "WVDNMixer only available with entity scheme"
+                self.mixer = WVDNMixer(args)
             else:
                 raise ValueError("Mixer {} not recognised.".format(args.mixer))
             self.params += list(self.mixer.parameters())
@@ -62,6 +67,11 @@ class QLearner:
                      batch["entity_mask"][:, :-1].repeat(repeat_batch, 1, 1)),
                     (entities[:, 1:],
                      batch["entity_mask"][:, 1:]))
+    
+    def local_q_hook(self, grad):
+        self.unnorm_local_q_weight = grad.detach()
+        self.local_q_weight = (grad / grad.sum(-1).unsqueeze(-1)).detach()
+        return grad
 
     def train(self, batch: EpisodeBatch, t_env: int, episode_num: int):
         # Get the relevant quantities
@@ -107,6 +117,14 @@ class QLearner:
             mac_out = self.mac.forward(batch, t=None)
             # Pick the Q-Values for the actions taken by each agent
             chosen_action_qvals = th.gather(mac_out[:, :-1], dim=3, index=actions).squeeze(3)  # Remove the last dim
+        if self.args.__dict__.get("local_constraint", False) and self.args.ave_tot:
+            bs, t, n_agent, n_action = mac_out[:,:-1].shape
+            repeat_actions = actions.repeat(1,1,1,n_agent*n_action) #bs*t*n_agent*(n_agent*n_action)
+            for i in range(n_agent):
+                repeat_actions[:,:,i,n_action*i:n_action*(i+1)] = th.arange(n_action).reshape(1,1,n_action).repeat(bs,t,1)
+            all_action_qvals = th.gather(mac_out[:, :-1], dim=3, index=repeat_actions) #bs,t,n,n_action*n_agent
+
+            
 
         self.target_mac.init_hidden(batch.batch_size)
 
@@ -131,7 +149,7 @@ class QLearner:
         if self.mixer is not None:
             if 'imagine' in self.args.agent:
                 mix_ins, targ_mix_ins = self._get_mixer_ins(batch)
-                chosen_action_qvals = self.mixer(chosen_action_qvals,
+                global_action_qvals = self.mixer(chosen_action_qvals,
                                                  mix_ins)
                 # don't need last timestep
                 groups = [gr[:, :-1] for gr in groups]
@@ -150,14 +168,23 @@ class QLearner:
                                              imagine_groups=groups)
             else:
                 mix_ins, targ_mix_ins = self._get_mixer_ins(batch)
-                chosen_action_qvals = self.mixer(chosen_action_qvals, mix_ins)
+                global_action_qvals = self.mixer(chosen_action_qvals, mix_ins)
+                #Warning: No implementation for entity_scheme if ave_tot==True
+                if self.args.__dict__.get("local_constraint", False) and self.args.ave_tot:
+                    ct_mix_ins, _ = self._get_mixer_ins(batch, repeat_batch=n_action*n_agent)
+                    all_action_qvals = all_action_qvals.permute(0,3,1,2).reshape(bs*n_agent*n_action, t, n_agent) #bs,t,n,n_a*n_ac -> bs,n_a*n_ac, t,n
+                    global_ct_qvals = self.mixer(all_action_qvals, ct_mix_ins)
+                    global_ct_qvals = global_ct_qvals.reshape(bs, n_agent*n_action, t, 1)
+                    global_ct_qvals = th.mean(global_ct_qvals, dim=1)
+
+
             target_max_qvals = self.target_mixer(target_max_qvals, targ_mix_ins)
 
         # Calculate 1-step Q-Learning targets
         targets = rewards + self.args.gamma * (1 - terminated) * target_max_qvals
 
         # Td-error
-        td_error = (chosen_action_qvals - targets.detach())
+        td_error = (global_action_qvals - targets.detach())
         mask = mask.expand_as(td_error)
         # 0-out the targets that came from padded data
         masked_td_error = td_error * mask
@@ -170,7 +197,29 @@ class QLearner:
             im_masked_td_error = im_td_error * mask
             im_loss = (im_masked_td_error ** 2).sum() / mask.sum()
             loss = (1 - im_prop) * loss + im_prop * im_loss
+        if self.args.__dict__.get("local_constraint", False):
+            if self.args.ave_tot:
+                target_qtot = global_ct_qvals
+            else:
+                target_qtot = global_action_qvals
+            q_constraint = th.clip((target_qtot.detach() - chosen_action_qvals)**2 - self.args.q_tol, min=0.0)
+            local_mask = mask.expand_as(q_constraint)
+            q_constraint = q_constraint*local_mask
+            local_loss = th.tensor(0.0)
+            valid_mask = (q_constraint > 0.0).sum()
+            if valid_mask > 0:
+                local_loss = self.args.local_constraint_weight * q_constraint.sum() / valid_mask
+            loss += local_loss
 
+            
+        # hk=chosen_action_qvals.register_hook(self.local_q_hook)
+        # orig_req_grad = [p.requires_grad for p in self.mac.parameters()]
+        # for p in self.mac.parameters():
+        #     p.requires_grad=False
+        # global_action_qvals.sum().backward(retain_graph=True)
+        # for p, rg in zip(self.mac.parameters(), orig_req_grad):
+        #     p.requires_grad = rg
+        # hk.remove()
         # Optimise
         self.optimiser.zero_grad()
         loss.backward()
@@ -187,6 +236,23 @@ class QLearner:
 
         if t_env - self.log_stats_t >= self.args.learner_log_interval:
             self.logger.log_stat("loss", loss.item(), t_env)
+            # self.logger.log_stat("max_local_weight", self.local_q_weight.max(-1)[0].mean().item(), t_env)
+            # self.logger.log_stat("min_local_weight", self.local_q_weight.min(-1)[0].mean().item(), t_env)
+            # self.logger.log_stat("delta_local_weight", (self.local_q_weight.max(-1)[0].mean()-self.local_q_weight.min(-1)[0].mean()).item(), t_env)
+            # self.logger.log_stat("max_local_weight[0,10]", self.local_q_weight[0,10].max(-1)[0].item(), t_env)
+            # self.logger.log_stat("min_local_weight[0,10]", self.local_q_weight[0,10].min(-1)[0].item(), t_env)
+            # self.logger.log_stat("unnorm_max_local_weight", self.unnorm_local_q_weight.max(-1)[0].mean().item(), t_env)
+            # self.logger.log_stat("unnorm_min_local_weight", self.unnorm_local_q_weight.min(-1)[0].mean().item(), t_env)
+            # self.logger.log_stat("unnorm_max_local_weight[0,10]", self.unnorm_local_q_weight[0,10].max(-1)[0].item(), t_env)
+            # self.logger.log_stat("unnorm_min_local_weight[0,10]", self.unnorm_local_q_weight[0,10].min(-1)[0].item(), t_env)
+            
+            self.logger.log_stat("min_local_taken_q", chosen_action_qvals.min(-1)[0].mean().item(), t_env)
+            self.logger.log_stat("max_local_taken_q", chosen_action_qvals.max(-1)[0].mean().item(), t_env)
+            # self.logger.log_stat("mean_local_taken_q", chosen_action_qvals.mean(-1)[0].mean().item(), t_env)
+            # self.logger.log_stat("min_local_taken_q[0,10]", chosen_action_qvals[0,10].min(-1)[0].item(), t_env)
+            # self.logger.log_stat("max_local_taken_q[0,10]", chosen_action_qvals[0,10].max(-1)[0].item(), t_env)
+            # self.logger.log_stat("mean_local_taken_q[0,10]", chosen_action_qvals[0,10].mean(-1).item(), t_env)
+            
             if 'imagine' in self.args.agent:
                 self.logger.log_stat("im_loss", im_loss.item(), t_env)
             if self.args.test_gt_factors:
@@ -195,8 +261,10 @@ class QLearner:
             self.logger.log_stat("grad_norm", grad_norm, t_env)
             mask_elems = mask.sum().item()
             self.logger.log_stat("td_error_abs", (masked_td_error.abs().sum().item()/mask_elems), t_env)
-            self.logger.log_stat("q_taken_mean", (chosen_action_qvals * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
+            self.logger.log_stat("q_taken_mean", (global_action_qvals * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
             self.logger.log_stat("target_mean", (targets * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
+            if self.args.__dict__.get("local_constraint", False):
+                self.logger.log_stat("local_loss", local_loss.item(), t_env)
             if batch.max_seq_length == 2:
                 # We are in a 1-step env. Calculate the max Q-Value for logging
                 max_agent_qvals = mac_out_detach[:,0].max(dim=2, keepdim=True)[0]
